@@ -326,14 +326,16 @@ async def on_contact(event: events.NewMessage.Event):
     await event.reply(AFTER_SEND_TEXT.format(servers=servers_txt), parse_mode="markdown")
 
 # -------------- Run --------------
-async def main():
-    async with aiosqlite.connect(DB_PATH) as conn:
-        await conn.executescript(INIT_SQL)
-        # ensure default settings
-        for k, v in DEFAULT_SETTINGS.items():
-            await db_set(conn, k, await db_get(conn, k, v))
-    print("Bot is running...")
-    await client.run_until_disconnected()
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    import asyncio
+
+    async def runner():
+        async with aiosqlite.connect(DB_PATH) as conn:
+            await conn.executescript(INIT_SQL)
+            for k, v in DEFAULT_SETTINGS.items():
+                await db_set(conn, k, await db_get(conn, k, v))
+        print("Bot is running...")
+        await client.run_until_disconnected()
+
+    asyncio.get_event_loop().run_until_complete(runner())
+
