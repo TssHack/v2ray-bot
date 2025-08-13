@@ -35,10 +35,10 @@ from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.tl.types import ChannelParticipant, ChannelParticipantLeft, ChannelParticipantBanned
 
 # ------------------ Config ------------------
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+API_ID = int(os.getenv("API_ID", "18377832"))
+API_HASH = os.getenv("API_HASH", "ed8556c450c6d0fd68912423325dd09c")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "6399155863:AAEIFUo7Uu9XTeB7YgFha7u_ixh9piIcBkU")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "1848591768"))
 SOURCE_URL = os.getenv("SOURCE_URL", "https://ehsan-v2ray.vercel.app/ehsan")
 DB_PATH = os.getenv("DB_PATH", "bot.db")
 
