@@ -507,25 +507,44 @@ async def stats_cmd(event: events.NewMessage.Event):
         await event.reply("خطا در دریافت آمار.")
 
 # -------------- Run --------------
-if __name__ == "__main__":
-    async def runner():
-        try:
-            # Initialize database
-            async with aiosqlite.connect(DB_PATH) as conn:
-                await conn.executescript(INIT_SQL)
-                for k, v in DEFAULT_SETTINGS.items():
-                    current_value = await db_get(conn, k, v)
-                    await db_set(conn, k, current_value)
-            
-            print("🤖 Bot is starting...")
-            print(f"📁 Database: {DB_PATH}")
-            print(f"👤 Admin ID: {ADMIN_ID}")
-            print(f"🌐 Source URL: {SOURCE_URL}")
-            print("✅ Bot is running...")
-            
-            await client.run_until_disconnected()
-        
-        except Exception as e:
-            print(f"❌ Error starting bot: {e}")
+async def init_database():
+    """Initialize database with default settings"""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.executescript(INIT_SQL)
+        for k, v in DEFAULT_SETTINGS.items():
+            current_value = await db_get(conn, k, v)
+            await db_set(conn, k, current_value)
 
-    asyncio.run(runner())
+def main():
+    print("🤖 Bot is starting...")
+    print(f"📁 Database: {DB_PATH}")
+    print(f"👤 Admin ID: {ADMIN_ID}")
+    print(f"🌐 Source URL: {SOURCE_URL}")
+    
+    try:
+        # Create new event loop
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        
+        # Initialize database
+        loop.run_until_complete(init_database())
+        
+        print("✅ Bot is running...")
+        
+        # Run the bot
+        with client:
+            client.run_until_disconnected()
+            
+    except KeyboardInterrupt:
+        print("\n🛑 Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Error starting bot: {e}")
+    finally:
+        # Clean up
+        try:
+            loop.close()
+        except:
+            pass
+
+if __name__ == "__main__":
+    main()
