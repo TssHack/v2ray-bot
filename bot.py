@@ -77,34 +77,33 @@ async def db_get(conn: aiosqlite.Connection, key: str, default: str = "") -> str
         return row[0] if row else default
 
 async def db_set(conn: aiosqlite.Connection, key: str, value: str):
-    await conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+    cur = await conn.execute("UPDATE settings SET value=? WHERE key=?", (value, key))
+    if cur.rowcount == 0:
+        await conn.execute("INSERT INTO settings(key,value) VALUES(?,?)", (key, value))
     await conn.commit()
-
-async def list_channels(conn: aiosqlite.Connection):
-    async with conn.execute("SELECT username FROM channels ORDER BY id ASC") as cur:
-        rows = await cur.fetchall()
-        return [r[0] for r in rows]
-
-async def add_channel(conn: aiosqlite.Connection, username: str) -> bool:
-    try:
-        await conn.execute("INSERT INTO channels(username) VALUES(?)", (username,))
-        await conn.commit()
-        return True
-    except Exception:
-        return False
-
-async def remove_channel(conn: aiosqlite.Connection, username: str) -> bool:
-    cur = await conn.execute("DELETE FROM channels WHERE username=?", (username,))
-    await conn.commit()
-    return cur.rowcount > 0
 
 async def save_user(conn: aiosqlite.Connection, user_id: int, username: str | None, phone: str | None):
     now = datetime.utcnow().isoformat()
-    await conn.execute(
-        "INSERT INTO users(user_id, username, phone, joined_at) VALUES(?,?,?,?) "
-        "ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, phone=COALESCE(excluded.phone, users.phone)",
-        (user_id, username, phone, now)
-    )
+
+    # اول سعی کن آپدیت کنی
+    if phone is not None:
+        cur = await conn.execute(
+            "UPDATE users SET username=?, phone=?, joined_at=? WHERE user_id=?",
+            (username, phone, now, user_id)
+        )
+    else:
+        cur = await conn.execute(
+            "UPDATE users SET username=?, joined_at=? WHERE user_id=?",
+            (username, now, user_id)
+        )
+
+    # اگر هیچ ردیفی آپدیت نشد، این یعنی کاربر وجود نداره → اینسرت کن
+    if cur.rowcount == 0:
+        await conn.execute(
+            "INSERT INTO users(user_id, username, phone, joined_at) VALUES(?,?,?,?)",
+            (user_id, username, phone, now)
+        )
+
     await conn.commit()
 
 async def get_users(conn: aiosqlite.Connection):
