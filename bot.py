@@ -7,6 +7,7 @@ Telethon bot that:
 - Fetches server list from ehsan-v2ray.vercel.app/ehsan (configurable) and sends 3 items
 - Appends a purchase message with @abj0o
 - Admin panel (only ADMIN_ID) to: toggle bot on/off, add/remove/list channels, list users
+- Database download functionality for admin
 
 Requirements:
     pip install telethon aiohttp aiosqlite python-dotenv
@@ -25,6 +26,7 @@ Notes:
 import asyncio
 import os
 import random
+import shutil
 from datetime import datetime
 
 import aiohttp
@@ -85,20 +87,24 @@ async def db_set(conn: aiosqlite.Connection, key: str, value: str):
 async def save_user(conn: aiosqlite.Connection, user_id: int, username: str | None, phone: str | None):
     now = datetime.utcnow().isoformat()
 
-    # اول سعی کن آپدیت کنی
-    if phone is not None:
-        cur = await conn.execute(
-            "UPDATE users SET username=?, phone=?, joined_at=? WHERE user_id=?",
-            (username, phone, now, user_id)
-        )
+    # Check if user exists
+    async with conn.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)) as cur:
+        exists = await cur.fetchone()
+    
+    if exists:
+        # Update existing user
+        if phone is not None:
+            await conn.execute(
+                "UPDATE users SET username=?, phone=?, joined_at=? WHERE user_id=?",
+                (username, phone, now, user_id)
+            )
+        else:
+            await conn.execute(
+                "UPDATE users SET username=?, joined_at=? WHERE user_id=?",
+                (username, now, user_id)
+            )
     else:
-        cur = await conn.execute(
-            "UPDATE users SET username=?, joined_at=? WHERE user_id=?",
-            (username, now, user_id)
-        )
-
-    # اگر هیچ ردیفی آپدیت نشد، این یعنی کاربر وجود نداره → اینسرت کن
-    if cur.rowcount == 0:
+        # Insert new user
         await conn.execute(
             "INSERT INTO users(user_id, username, phone, joined_at) VALUES(?,?,?,?)",
             (user_id, username, phone, now)
@@ -110,12 +116,33 @@ async def get_users(conn: aiosqlite.Connection):
     async with conn.execute("SELECT user_id, username, phone, joined_at FROM users ORDER BY joined_at DESC") as cur:
         return await cur.fetchall()
 
+async def add_channel(conn: aiosqlite.Connection, username: str) -> bool:
+    try:
+        await conn.execute("INSERT INTO channels(username) VALUES(?)", (username,))
+        await conn.commit()
+        return True
+    except Exception:
+        return False
+
+async def remove_channel(conn: aiosqlite.Connection, username: str) -> bool:
+    cur = await conn.execute("DELETE FROM channels WHERE username=?", (username,))
+    await conn.commit()
+    return cur.rowcount > 0
+
+async def list_channels(conn: aiosqlite.Connection) -> list[str]:
+    async with conn.execute("SELECT username FROM channels") as cur:
+        rows = await cur.fetchall()
+        return [row[0] for row in rows]
+
 async def is_member(client: TelegramClient, user_id: int, channel_username: str) -> bool:
     """Return True if user is a member (not left/banned)."""
     try:
         entity = await client.get_entity(channel_username)
     except UsernameNotOccupiedError:
         return False
+    except Exception:
+        return False
+    
     try:
         res = await client(GetParticipantRequest(entity, user_id))
         participant = res.participant
@@ -136,17 +163,33 @@ async def check_all_memberships(client: TelegramClient, user_id: int, channels: 
     return not_joined
 
 async def fetch_servers() -> list[str]:
-    timeout = aiohttp.ClientTimeout(total=10)
-    async with aiohttp.ClientSession(timeout=timeout) as sess:
-        async with sess.get(SOURCE_URL) as resp:
-            text = await resp.text()
-    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-    return lines
+    try:
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as sess:
+            async with sess.get(SOURCE_URL) as resp:
+                text = await resp.text()
+        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+        return lines
+    except Exception as e:
+        print(f"Error fetching servers: {e}")
+        return []
 
 def pick_three(items: list[str]) -> list[str]:
     if len(items) <= 3:
         return items
     return random.sample(items, 3)
+
+async def backup_database() -> str:
+    """Create a backup of the database and return the backup file path"""
+    backup_name = f"bot_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
+    backup_path = f"/tmp/{backup_name}"
+    
+    try:
+        shutil.copy2(DB_PATH, backup_path)
+        return backup_path
+    except Exception as e:
+        print(f"Error creating backup: {e}")
+        return None
 
 # ------------------ Bot ------------------
 client = TelegramClient("bot", API_ID, API_HASH).start(bot_token=BOT_TOKEN)
@@ -163,14 +206,17 @@ AFTER_SEND_TEXT = (
 # ---------- UI builders ----------
 
 def join_keyboard(channels: list[str]):
-    rows = [[Button.url(f"عضویت در {ch}", f"https://t.me/{ch.lstrip('@')}")] for ch in channels]
+    rows = []
+    for ch in channels:
+        # Remove @ if it exists for the URL
+        clean_ch = ch.lstrip('@')
+        rows.append([Button.url(f"عضویت در {ch}", f"https://t.me/{clean_ch}")])
     rows.append([Button.inline("✅ انجام شد", data=b"verify_membership")])
     return rows
 
-
 ADMIN_MENU = [
     [Button.inline("🔌 روشن/خاموش ربات", b"toggle_bot"), Button.inline("📢 کانال‌های اجباری", b"channels_menu")],
-    [Button.inline("👥 کاربران", b"users_menu")],
+    [Button.inline("👥 کاربران", b"users_menu"), Button.inline("💾 دانلود دیتابیس", b"download_db")],
 ]
 
 CHANNELS_MENU = [
@@ -185,157 +231,301 @@ USERS_MENU = [
 # ------------------ Handlers ------------------
 @client.on(events.NewMessage(pattern=r"^/start"))
 async def start_handler(event: events.NewMessage.Event):
-    async with aiosqlite.connect(DB_PATH) as conn:
-        await conn.executescript(INIT_SQL)
-        # ensure default settings
-        for k, v in DEFAULT_SETTINGS.items():
-            await db_set(conn, k, await db_get(conn, k, v))
+    try:
+        async with aiosqlite.connect(DB_PATH) as conn:
+            await conn.executescript(INIT_SQL)
+            # ensure default settings
+            for k, v in DEFAULT_SETTINGS.items():
+                current_value = await db_get(conn, k, v)
+                await db_set(conn, k, current_value)
 
-        bot_enabled = await db_get(conn, "bot_enabled", "1")
-        if bot_enabled != "1" and event.sender_id != ADMIN_ID:
-            await event.reply("ربات فعلاً غیرفعال است. لطفاً بعداً امتحان کنید.")
-            return
+            bot_enabled = await db_get(conn, "bot_enabled", "1")
+            if bot_enabled != "1" and event.sender_id != ADMIN_ID:
+                await event.reply("ربات فعلاً غیرفعال است. لطفاً بعداً امتحان کنید.")
+                return
 
-        chs = await list_channels(conn)
-        await save_user(conn, event.sender_id, (await event.get_sender()).username, None)
+            chs = await list_channels(conn)
+            sender = await event.get_sender()
+            username = sender.username if sender else None
+            await save_user(conn, event.sender_id, username, None)
 
-    if chs:
-        kb = join_keyboard(chs)
-        await event.reply(JOIN_TEXT, buttons=kb, parse_mode="markdown")
-    else:
-        # No channels required → ask phone immediately
-        await ask_phone(event)
+        if chs:
+            kb = join_keyboard(chs)
+            await event.reply(JOIN_TEXT, buttons=kb, parse_mode="markdown")
+        else:
+            # No channels required → ask phone immediately
+            await ask_phone(event)
+    except Exception as e:
+        print(f"Error in start_handler: {e}")
+        await event.reply("خطایی رخ داد. لطفاً دوباره تلاش کنید.")
 
 async def ask_phone(event_or_conv):
     btn = [
-        [Button.request_phone("دریافت کانفینگ رایگان")]
+        [Button.request_phone("📱 دریافت کانفینگ رایگان")]
     ]
-    await event_or_conv.reply("برای ادامه روی دکمه زیر بزنید تا کانفینگ خود را دریافت کنید.:", buttons=btn)
+    await event_or_conv.reply("برای ادامه روی دکمه زیر بزنید تا کانفینگ خود را دریافت کنید:", buttons=btn)
 
 @client.on(events.CallbackQuery)
 async def callbacks(event: events.CallbackQuery.Event):
-    if event.sender_id == ADMIN_ID:
-        if event.data == b"toggle_bot":
-            async with aiosqlite.connect(DB_PATH) as conn:
-                cur = await db_get(conn, "bot_enabled", "1")
-                newv = "0" if cur == "1" else "1"
-                await db_set(conn, "bot_enabled", newv)
-            await event.edit(f"وضعیت ربات: {'✅ روشن' if newv=='1' else '⛔️ خاموش'}", buttons=ADMIN_MENU)
-            return
-        if event.data == b"channels_menu":
-            await event.edit("مدیریت کانال‌ها:", buttons=CHANNELS_MENU)
-            return
-        if event.data == b"users_menu":
-            await event.edit("مدیریت کاربران:", buttons=USERS_MENU)
-            return
-        if event.data == b"admin_back":
-            await event.edit("پنل ادمین:", buttons=ADMIN_MENU)
-            return
-        if event.data == b"ch_add":
-            admin_flow_state[event.sender_id] = ("await_channel_add",)
-            await event.respond("یوزرنیم کانال عمومی را بفرستید (مثال: @mychannel)")
-            return
-        if event.data == b"ch_remove":
-            admin_flow_state[event.sender_id] = ("await_channel_remove",)
-            await event.respond("یوزرنیم کانال برای حذف را بفرستید (مثال: @mychannel)")
-            return
-        if event.data == b"ch_list":
+    try:
+        # Admin callbacks
+        if event.sender_id == ADMIN_ID:
+            if event.data == b"toggle_bot":
+                async with aiosqlite.connect(DB_PATH) as conn:
+                    cur = await db_get(conn, "bot_enabled", "1")
+                    newv = "0" if cur == "1" else "1"
+                    await db_set(conn, "bot_enabled", newv)
+                await event.edit(f"وضعیت ربات: {'✅ روشن' if newv=='1' else '⛔️ خاموش'}", buttons=ADMIN_MENU)
+                return
+            if event.data == b"channels_menu":
+                await event.edit("مدیریت کانال‌ها:", buttons=CHANNELS_MENU)
+                return
+            if event.data == b"users_menu":
+                await event.edit("مدیریت کاربران:", buttons=USERS_MENU)
+                return
+            if event.data == b"admin_back":
+                async with aiosqlite.connect(DB_PATH) as conn:
+                    bot_enabled = await db_get(conn, "bot_enabled", "1")
+                status = '✅ روشن' if bot_enabled == '1' else '⛔️ خاموش'
+                await event.edit(f"پنل ادمین (وضعیت ربات: {status})", buttons=ADMIN_MENU)
+                return
+            if event.data == b"ch_add":
+                admin_flow_state[event.sender_id] = ("await_channel_add",)
+                await event.respond("یوزرنیم کانال عمومی را بفرستید (مثال: @mychannel)")
+                return
+            if event.data == b"ch_remove":
+                admin_flow_state[event.sender_id] = ("await_channel_remove",)
+                await event.respond("یوزرنیم کانال برای حذف را بفرستید (مثال: @mychannel)")
+                return
+            if event.data == b"ch_list":
+                async with aiosqlite.connect(DB_PATH) as conn:
+                    chs = await list_channels(conn)
+                txt = "\n".join(chs) if chs else "هیچ کانالی ثبت نشده است."
+                await event.respond(f"کانال‌های اجباری:\n{txt}")
+                return
+            if event.data == b"u_list":
+                async with aiosqlite.connect(DB_PATH) as conn:
+                    users = await get_users(conn)
+                if not users:
+                    await event.respond("لیست کاربران خالی است.")
+                else:
+                    lines = []
+                    for i, (uid, uname, phone, joined) in enumerate(users[:50], 1):  # Limit to 50 users per message
+                        lines.append(f"{i}. ID: {uid} | @{uname or '-'} | {phone or '-'} | {joined[:10]}")
+                    
+                    text = "📊 لیست کاربران:\n\n" + "\n".join(lines)
+                    if len(users) > 50:
+                        text += f"\n\n... و {len(users) - 50} کاربر دیگر"
+                    
+                    await event.respond(text)
+                return
+            if event.data == b"download_db":
+                await event.respond("در حال آماده‌سازی فایل دیتابیس...")
+                backup_path = await backup_database()
+                if backup_path:
+                    try:
+                        await client.send_file(event.sender_id, backup_path, caption="📁 فایل دیتابیس ربات")
+                        # Clean up the backup file
+                        os.remove(backup_path)
+                        await event.respond("✅ فایل دیتابیس با موفقیت ارسال شد.")
+                    except Exception as e:
+                        await event.respond(f"❌ خطا در ارسال فایل: {str(e)}")
+                        if os.path.exists(backup_path):
+                            os.remove(backup_path)
+                else:
+                    await event.respond("❌ خطا در ایجاد فایل پشتیبان.")
+                return
+
+        # User callbacks
+        if event.data == b"verify_membership":
             async with aiosqlite.connect(DB_PATH) as conn:
                 chs = await list_channels(conn)
-            txt = "\n".join(chs) if chs else "هیچ کانالی ثبت نشده است."
-            await event.respond(f"کانال‌های اجباری:\n{txt}")
-            return
-        if event.data == b"u_list":
-            async with aiosqlite.connect(DB_PATH) as conn:
-                users = await get_users(conn)
-            if not users:
-                await event.respond("لیست کاربران خالی است.")
+            if not chs:
+                await event.answer("کانالی تعریف نشده است.", alert=True)
+                await ask_phone(event)
+                return
+            
+            await event.answer("در حال بررسی عضویت...")
+            not_joined = await check_all_memberships(client, event.sender_id, chs)
+            if not_joined:
+                kb = join_keyboard(chs)
+                missing_channels = ", ".join(not_joined)
+                await event.edit(f"عضویت شما در کانال‌های زیر کامل نیست:\n{missing_channels}\n\nلطفاً در همه کانال‌ها عضو شوید و دوباره امتحان کنید.", buttons=kb)
             else:
-                lines = []
-                for (uid, uname, phone, joined) in users[:100]:
-                    lines.append(f"{uid} | @{uname or '-'} | {phone or '-'} | {joined}")
-                await event.respond("کاربران:\n" + "\n".join(lines))
-            return
+                await event.edit("✅ عضویت تایید شد!")
+                await ask_phone(event)
 
-    if event.data == b"verify_membership":
-        async with aiosqlite.connect(DB_PATH) as conn:
-            chs = await list_channels(conn)
-        if not chs:
-            await event.answer("کانالی تعریف نشده است.", alert=True)
-            await ask_phone(event)
-            return
-        not_joined = await check_all_memberships(client, event.sender_id, chs)
-        if not_joined:
-            kb = join_keyboard(chs)
-            await event.edit("عضویت شما کامل نیست. لطفاً همه کانال‌ها را عضو شوید و دوباره امتحان کنید.", buttons=kb)
-        else:
-            await event.edit("✅ عضویت تایید شد.")
-            await ask_phone(event)
+    except Exception as e:
+        print(f"Error in callbacks: {e}")
+        await event.answer("خطایی رخ داد. لطفاً دوباره تلاش کنید.", alert=True)
 
 @client.on(events.NewMessage(from_users=ADMIN_ID))
 async def admin_flows(event: events.NewMessage.Event):
-    state = admin_flow_state.get(event.sender_id)
-    if not state:
-        return
-    mode = state[0]
-    if mode == "await_channel_add":
-        username = event.raw_text.strip()
-        if not username.startswith("@"):
-            await event.reply("فرمت نادرست است. با @ شروع کنید.")
+    try:
+        state = admin_flow_state.get(event.sender_id)
+        if not state:
             return
-        async with aiosqlite.connect(DB_PATH) as conn:
-            ok = await add_channel(conn, username)
-        await event.reply("✅ اضافه شد" if ok else "⚠️ قبلاً وجود دارد یا خطا رخ داد")
-        admin_flow_state.pop(event.sender_id, None)
-    elif mode == "await_channel_remove":
-        username = event.raw_text.strip()
-        async with aiosqlite.connect(DB_PATH) as conn:
-            ok = await remove_channel(conn, username)
-        await event.reply("✅ حذف شد" if ok else "⚠️ یافت نشد")
+        
+        mode = state[0]
+        if mode == "await_channel_add":
+            username = event.raw_text.strip()
+            if not username.startswith("@"):
+                await event.reply("❌ فرمت نادرست است. با @ شروع کنید. (مثال: @mychannel)")
+                return
+            
+            async with aiosqlite.connect(DB_PATH) as conn:
+                ok = await add_channel(conn, username)
+            
+            if ok:
+                await event.reply(f"✅ کانال {username} با موفقیت اضافه شد!")
+            else:
+                await event.reply("⚠️ کانال قبلاً وجود دارد یا خطا رخ داد")
+            
+            admin_flow_state.pop(event.sender_id, None)
+            
+        elif mode == "await_channel_remove":
+            username = event.raw_text.strip()
+            if not username.startswith("@"):
+                username = "@" + username  # Auto-add @ if missing
+            
+            async with aiosqlite.connect(DB_PATH) as conn:
+                ok = await remove_channel(conn, username)
+            
+            if ok:
+                await event.reply(f"✅ کانال {username} با موفقیت حذف شد!")
+            else:
+                await event.reply("⚠️ کانال یافت نشد")
+            
+            admin_flow_state.pop(event.sender_id, None)
+    
+    except Exception as e:
+        print(f"Error in admin_flows: {e}")
+        await event.reply("خطایی رخ داد. لطفاً دوباره تلاش کنید.")
         admin_flow_state.pop(event.sender_id, None)
 
 @client.on(events.NewMessage(pattern=r"^/admin$"))
 async def admin_menu(event: events.NewMessage.Event):
     if event.sender_id != ADMIN_ID:
         return
-    async with aiosqlite.connect(DB_PATH) as conn:
-        bot_enabled = await db_get(conn, "bot_enabled", "1")
-    status = '✅ روشن' if bot_enabled == '1' else '⛔️ خاموش'
-    await event.reply(f"پنل ادمین (وضعیت ربات: {status})", buttons=ADMIN_MENU)
+    
+    try:
+        async with aiosqlite.connect(DB_PATH) as conn:
+            bot_enabled = await db_get(conn, "bot_enabled", "1")
+        status = '✅ روشن' if bot_enabled == '1' else '⛔️ خاموش'
+        await event.reply(f"🔧 پنل ادمین\n\nوضعیت ربات: {status}", buttons=ADMIN_MENU)
+    except Exception as e:
+        print(f"Error in admin_menu: {e}")
+        await event.reply("خطایی رخ داد.")
 
 @client.on(events.NewMessage(pattern=r"^/help$"))
 async def help_cmd(event: events.NewMessage.Event):
-    await event.reply("/start - شروع\n/admin - پنل ادمین (فقط مدیر)")
+    help_text = """
+🤖 راهنمای ربات:
+
+/start - شروع و دریافت کانفیگ رایگان
+/help - نمایش این راهنما
+
+👨‍💼 دستورات مدیر:
+/admin - ورود به پنل مدیریت
+
+📞 برای پشتیبانی: @abj0o
+    """
+    await event.reply(help_text.strip())
 
 @client.on(events.NewMessage(func=lambda e: bool(e.contact)))
 async def on_contact(event: events.NewMessage.Event):
-    contact = event.message.contact
-    phone = contact.phone_number if contact else None
-    async with aiosqlite.connect(DB_PATH) as conn:
-        await save_user(conn, event.sender_id, (await event.get_sender()).username, phone)
-
-    # Fetch servers and send 3
     try:
-        servers = await fetch_servers()
-    except Exception:
-        await event.reply("خطا در دریافت سرورها. لطفاً دوباره تلاش کنید.")
-        return
-    three = pick_three(servers)
+        contact = event.message.contact
+        phone = contact.phone_number if contact else None
+        
+        sender = await event.get_sender()
+        username = sender.username if sender else None
+        
+        async with aiosqlite.connect(DB_PATH) as conn:
+            await save_user(conn, event.sender_id, username, phone)
 
-    servers_txt = "\n".join(three)
-    await event.reply(AFTER_SEND_TEXT.format(servers=servers_txt), parse_mode="markdown")
+        await event.reply("✅ شماره تماس شما ثبت شد!")
+        
+        # Fetch servers and send 3
+        servers = await fetch_servers()
+        if not servers:
+            await event.reply("❌ خطا در دریافت سرورها. لطفاً بعداً دوباره تلاش کنید.")
+            return
+        
+        three = pick_three(servers)
+        if not three:
+            await event.reply("❌ هیچ سروری در دسترس نیست.")
+            return
+
+        servers_txt = "\n".join(f"🔗 `{server}`" for server in three)
+        final_message = AFTER_SEND_TEXT.format(servers=servers_txt)
+        
+        await event.reply(final_message, parse_mode="markdown")
+
+    except Exception as e:
+        print(f"Error in on_contact: {e}")
+        await event.reply("خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+
+@client.on(events.NewMessage(pattern=r"^/stats$"))
+async def stats_cmd(event: events.NewMessage.Event):
+    if event.sender_id != ADMIN_ID:
+        return
+    
+    try:
+        async with aiosqlite.connect(DB_PATH) as conn:
+            # Count total users
+            async with conn.execute("SELECT COUNT(*) FROM users") as cur:
+                total_users = (await cur.fetchone())[0]
+            
+            # Count users with phone numbers
+            async with conn.execute("SELECT COUNT(*) FROM users WHERE phone IS NOT NULL") as cur:
+                users_with_phone = (await cur.fetchone())[0]
+            
+            # Count channels
+            async with conn.execute("SELECT COUNT(*) FROM channels") as cur:
+                total_channels = (await cur.fetchone())[0]
+            
+            bot_enabled = await db_get(conn, "bot_enabled", "1")
+        
+        status = '✅ فعال' if bot_enabled == '1' else '⛔️ غیرفعال'
+        
+        stats_text = f"""
+📊 آمار ربات:
+
+👥 کل کاربران: {total_users}
+📱 کاربران با شماره: {users_with_phone}
+📢 کانال‌های اجباری: {total_channels}
+🔌 وضعیت ربات: {status}
+
+📅 تاریخ: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+        """
+        
+        await event.reply(stats_text.strip())
+    
+    except Exception as e:
+        print(f"Error in stats_cmd: {e}")
+        await event.reply("خطا در دریافت آمار.")
 
 # -------------- Run --------------
 if __name__ == "__main__":
-    import asyncio
-
     async def runner():
-        async with aiosqlite.connect(DB_PATH) as conn:
-            await conn.executescript(INIT_SQL)
-            for k, v in DEFAULT_SETTINGS.items():
-                await db_set(conn, k, await db_get(conn, k, v))
-        print("Bot is running...")
-        await client.run_until_disconnected()
+        try:
+            # Initialize database
+            async with aiosqlite.connect(DB_PATH) as conn:
+                await conn.executescript(INIT_SQL)
+                for k, v in DEFAULT_SETTINGS.items():
+                    current_value = await db_get(conn, k, v)
+                    await db_set(conn, k, current_value)
+            
+            print("🤖 Bot is starting...")
+            print(f"📁 Database: {DB_PATH}")
+            print(f"👤 Admin ID: {ADMIN_ID}")
+            print(f"🌐 Source URL: {SOURCE_URL}")
+            print("✅ Bot is running...")
+            
+            await client.run_until_disconnected()
+        
+        except Exception as e:
+            print(f"❌ Error starting bot: {e}")
 
-    asyncio.get_event_loop().run_until_complete(runner())
-
+    asyncio.run(runner())
