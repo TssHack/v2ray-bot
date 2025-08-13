@@ -29,7 +29,7 @@ import random
 import shutil
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 import aiohttp
 import aiosqlite
@@ -90,7 +90,7 @@ async def db_set(conn: aiosqlite.Connection, key: str, value: str):
     await conn.commit()
 
 async def save_user(conn: aiosqlite.Connection, user_id: int, username: str | None, phone: str | None):
-    now = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat()
 
     # Check if user exists
     async with conn.execute("SELECT user_id FROM users WHERE user_id=?", (user_id,)) as cur:
@@ -280,7 +280,10 @@ class V2RayBot:
                             cur = await db_get(conn, "bot_enabled", "1")
                             newv = "0" if cur == "1" else "1"
                             await db_set(conn, "bot_enabled", newv)
-                        await event.edit(f"وضعیت ربات: {'✅ روشن' if newv=='1' else '⛔️ خاموش'}", buttons=ADMIN_MENU)
+                        new_text = f"وضعیت ربات: {'✅ روشن' if newv=='1' else '⛔️ خاموش'}"
+                        # Only edit if content is different
+                        if event.message.message != new_text:
+                            await event.edit(new_text, buttons=ADMIN_MENU)
                         return
                     if event.data == b"channels_menu":
                         await event.edit("مدیریت کانال‌ها:", buttons=CHANNELS_MENU)
@@ -292,7 +295,10 @@ class V2RayBot:
                         async with aiosqlite.connect(DB_PATH) as conn:
                             bot_enabled = await db_get(conn, "bot_enabled", "1")
                         status = '✅ روشن' if bot_enabled == '1' else '⛔️ خاموش'
-                        await event.edit(f"پنل ادمین (وضعیت ربات: {status})", buttons=ADMIN_MENU)
+                        new_text = f"🔧 پنل ادمین\n\nوضعیت ربات: {status}"
+                        # Only edit if content is different
+                        if event.message.message != new_text:
+                            await event.edit(new_text, buttons=ADMIN_MENU)
                         return
                     if event.data == b"ch_add":
                         admin_flow_state[event.sender_id] = ("await_channel_add",)
