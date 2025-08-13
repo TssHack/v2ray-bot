@@ -484,8 +484,6 @@ class V2RayBot:
                 
                 async with aiosqlite.connect(DB_PATH) as conn:
                     await save_user(conn, event.sender_id, username, phone)
-
-                await event.reply("✅ شماره تماس شما ثبت شد!")
                 
                 # Fetch servers and send 3
                 servers = await fetch_servers()
