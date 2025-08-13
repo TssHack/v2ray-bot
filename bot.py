@@ -142,22 +142,48 @@ async def list_channels(conn: aiosqlite.Connection) -> list[str]:
 async def is_member(client: TelegramClient, user_id: int, channel_username: str) -> bool:
     """Return True if user is a member (not left/banned)."""
     try:
+        # Get the channel entity
         entity = await client.get_entity(channel_username)
     except UsernameNotOccupiedError:
+        print(f"Channel {channel_username} not found")
         return False
-    except Exception:
+    except Exception as e:
+        print(f"Error getting entity for {channel_username}: {e}")
         return False
     
     try:
+        # Try to get participant info
         res = await client(GetParticipantRequest(entity, user_id))
         participant = res.participant
+        
+        # Check if user is banned or left
         if isinstance(participant, (ChannelParticipantLeft, ChannelParticipantBanned)):
+            print(f"User {user_id} is left/banned from {channel_username}")
             return False
-        # Any other ChannelParticipant means present
-        return isinstance(participant, ChannelParticipant)
-    except Exception:
-        # If bot lacks permission, conservatively say not a member
+        
+        # If we got any other ChannelParticipant, user is a member
+        if isinstance(participant, ChannelParticipant):
+            print(f"User {user_id} is member of {channel_username}")
+            return True
+            
         return False
+        
+    except Exception as e:
+        print(f"Error checking membership for {user_id} in {channel_username}: {e}")
+        
+        # Alternative method: try to get user from channel members
+        try:
+            async for user in client.iter_participants(entity, limit=None):
+                if user.id == user_id:
+                    print(f"User {user_id} found in participants of {channel_username}")
+                    return True
+            print(f"User {user_id} not found in participants of {channel_username}")
+            return False
+        except Exception as e2:
+            print(f"Alternative check also failed for {channel_username}: {e2}")
+            # If bot is admin, assume user is not member
+            # If bot lacks permission, it should be made admin
+            return False
 
 async def check_all_memberships(client: TelegramClient, user_id: int, channels: list[str]) -> list[str]:
     not_joined = []
@@ -357,7 +383,11 @@ class V2RayBot:
                         return
                     
                     await event.answer("در حال بررسی عضویت...")
+                    print(f"Checking membership for user {event.sender_id} in channels: {chs}")
+                    
                     not_joined = await check_all_memberships(self.client, event.sender_id, chs)
+                    print(f"Not joined channels: {not_joined}")
+                    
                     if not_joined:
                         kb = join_keyboard(chs)
                         missing_channels = ", ".join(not_joined)
@@ -476,6 +506,50 @@ class V2RayBot:
             except Exception as e:
                 print(f"Error in on_contact: {e}")
                 await event.reply("خطایی رخ داد. لطفاً دوباره تلاش کنید.")
+
+        @self.client.on(events.NewMessage(pattern=r"^/debug$"))
+        async def debug_cmd(event: events.NewMessage.Event):
+            if event.sender_id != ADMIN_ID:
+                return
+            
+            try:
+                async with aiosqlite.connect(DB_PATH) as conn:
+                    chs = await list_channels(conn)
+                
+                debug_info = f"🔍 اطلاعات دیباگ:\n\n"
+                debug_info += f"👤 Admin ID: {ADMIN_ID}\n"
+                debug_info += f"📋 کانال‌های تعریف شده: {len(chs)}\n"
+                
+                if chs:
+                    debug_info += f"📂 لیست کانال‌ها:\n"
+                    for i, ch in enumerate(chs, 1):
+                        debug_info += f"  {i}. {ch}\n"
+                    
+                    debug_info += f"\n🔍 بررسی عضویت شما:\n"
+                    for ch in chs:
+                        is_member_result = await is_member(self.client, event.sender_id, ch)
+                        debug_info += f"  {ch}: {'✅ عضو' if is_member_result else '❌ عضو نیست'}\n"
+                
+                await event.reply(debug_info)
+                
+            except Exception as e:
+                print(f"Error in debug_cmd: {e}")
+                await event.reply(f"خطا در دیباگ: {str(e)}")
+
+        @self.client.on(events.NewMessage(pattern=r"^/test_member (.+)$"))
+        async def test_member_cmd(event: events.NewMessage.Event):
+            if event.sender_id != ADMIN_ID:
+                return
+            
+            channel = event.pattern_match.group(1).strip()
+            if not channel.startswith("@"):
+                channel = "@" + channel
+                
+            try:
+                result = await is_member(self.client, event.sender_id, channel)
+                await event.reply(f"🔍 تست عضویت در {channel}:\n{'✅ عضو هستید' if result else '❌ عضو نیستید'}")
+            except Exception as e:
+                await event.reply(f"خطا در تست: {str(e)}")
 
         @self.client.on(events.NewMessage(pattern=r"^/stats$"))
         async def stats_cmd(event: events.NewMessage.Event):
