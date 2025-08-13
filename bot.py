@@ -164,9 +164,10 @@ AFTER_SEND_TEXT = (
 # ---------- UI builders ----------
 
 def join_keyboard(channels: list[str]):
-    rows = [[Button.url(f"عضویت در {ch}", f"https://t.me/{ch.lstrip('@')}")]] for ch in channels]
+    rows = [[Button.url(f"عضویت در {ch}", f"https://t.me/{ch.lstrip('@')}")] for ch in channels]
     rows.append([Button.inline("✅ انجام شد", data=b"verify_membership")])
     return rows
+
 
 ADMIN_MENU = [
     [Button.inline("🔌 روشن/خاموش ربات", b"toggle_bot"), Button.inline("📢 کانال‌های اجباری", b"channels_menu")],
